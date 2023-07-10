@@ -57,7 +57,7 @@ def load_data(filename, delim=",", skip_rows=1):
     Parameters
     ----------
     filename : string
-    Name of the file (with extension) from which the dataset is loaded.
+        Name of the file (with extension) from which the dataset is loaded.
     delim : string, optional
         Column delimiter. Default is "," for .csv files.
     skip_rows : int, optional

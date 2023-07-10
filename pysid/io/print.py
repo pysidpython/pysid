@@ -16,13 +16,14 @@ def poly_to_str(P,prec=3):
     Parameters
     ----------
     P : ndarray of ndarray
-        Set of polynomials to be displayed.
-        
+        Set of polynomials to be displayed.        
     prec : integer, optional
         Decimal precision for the coefficients. Default is prec = 3.
     Returns
     -------
-    
+    label : string
+        Formatted string in LaTeX ready to be displayed.
+
     """
     if P is None:
         raise Exception("Polynomial is equal to None.")
