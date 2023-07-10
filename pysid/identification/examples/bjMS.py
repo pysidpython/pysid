@@ -32,7 +32,7 @@ thetao = [-1.2, 0.36, -1.4, 0.49, 0.5, 0.1, 0.3, -0.2, 0.8, 0.16, -1.8, 0.91]
 #Number of Samples
 N = 400
 #Take u as uniform
-u = -1 + 2*random((N, nu))
+u = -1 + 2*randn(N, nu)
 #u = ones((N, nu))
 #Generate gaussian white noise with standard deviation 0.1
 e = 0.01*randn(N, ny)
@@ -43,4 +43,4 @@ y3 = lfilter(Co, Do, e[:,0:1], axis=0)
 y_ = y1 + y2 + y3
 y = lfilter(B1o, F1o, u[:,0:1], axis=0) + lfilter(B2o, F2o, u[:,1:2], axis=0) + lfilter(Co, Do, e[:,0:1], axis=0)
 #Estimate the model and get only the parameters
-B, C, D, F = bj(nb, nc, nd, nf, nk, u, y)
+m = bj(nb, nc, nd, nf, nk, u, y)

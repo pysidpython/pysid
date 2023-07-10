@@ -1,27 +1,116 @@
-# This modules provides prediction error methods for discrete-time linear
-# models
 """
-Module for Prediction error methods
+    Module for Prediction error methods
 """
 
 # Imports
-from numpy import arange, atleast_2d, asarray, array, append, asscalar, copy, count_nonzero, ones,\
-delete, dot, empty, sum, size, amax, matrix, concatenate, shape, zeros, kron,\
-eye, reshape, convolve, sqrt, where, nonzero, correlate, equal, ndarray, pi, \
-absolute, exp, log, real, issubdtype, integer, expand_dims
-from scipy.linalg import qr, solve, toeplitz
-from numpy.linalg import matrix_rank
-from scipy.signal import lfilter, periodogram
-from scipy.optimize import leastsq, least_squares
-from .tseries import arma
+from numpy import arange, array, append, copy, count_nonzero,\
+delete, dot, empty, sum, size, amax, concatenate, shape, zeros, kron,\
+eye, reshape, convolve, where, equal, ndarray, floor
+from scipy.linalg import toeplitz, inv
+from scipy.signal import lfilter
+from scipy.optimize import least_squares
 from .solvers import ls, qrsol
 from ..io.check import chckin
-import numpy.fft as fft
+from .models import polymodel
 
 # functions
 __all__ = ['fir', 'arx', 'armax', 'oe', 'bj', 'pem']
 
 # Implementation
+def filtmat(matrix, signal, diag=-1, isvec=True, isrational=False):
+    """
+    Filters a set of input signals (x) through a matrix (M) of polynomials, such that:
+        y(t) = M*x(t)
+    If a diagonal matrix (D) is also passed as a parameter, the output is then filtered
+    by the inverse of (D), resulting in:
+        y(t) = D^(-1)*M*x(t)
+    The diagonal matrix can be (and is, by default) represented as a column vector
+    containing the diagonal entries in its rows.
+
+    Parameters
+    ----------
+    matrix : ndarray of ndarray
+        Matrix of polynomials for linear filtering.
+    signal : ndarray
+        Input signal to be filtered.
+    diag : ndarray of ndarray, optional
+        Diagonal matrix to be used in inverse filtering. Default is -1, which bypasses filtering.
+    isvec: boolean, optional
+        Flag that indicates whether the diagonal matrix (diag) is represented as a vector.
+    isrational: boolean, optional
+        Flag that indicates whether the matrix (matrix) is a tuple matrix of rational polynomials
+        such that matrix = (num, den)
+    Returns
+    -------
+    out : ndarray
+        Filtered output signal.
+    """
+    # Checking type
+    if not isinstance(matrix, ndarray) or not isinstance(signal,ndarray):
+        raise Exception("Input arguments type must be numpy.ndarray.")
+
+    m, n = matrix.shape
+    ms, ns = signal.shape
+
+
+    # Checking dimension
+    if ns != n:
+        raise Exception("The input signal must have the same number of columns than the input matrix")
+
+    output = zeros([ms, m])
+    for i in range(m):
+        for j in range(n):
+            if isrational:
+                output[:, i] += lfilter(matrix[i, j][0], matrix[i, j][1], signal[:, j], axis = 0)
+            else:
+                output[:, i] += lfilter(matrix[i, j], [1], signal[:, j], axis = 0)
+        if type(diag) != int:
+            if isrational:
+                if isvec == True:
+                    output[:, i] = lfilter(diag[i, 0][0], diag[i, 0][1], output[:, i], axis = 0)
+                else:
+                    output[:, i] = lfilter(diag[i, i][0], diag[i, i][1], output[:, i], axis = 0)
+            else:
+                if isvec == True:
+                    output[:, i] = lfilter([1], diag[i, 0], output[:, i], axis = 0)
+                else:
+                    output[:, i] = lfilter([1], diag[i, i], output[:, i], axis = 0)
+    return output
+
+def sortmat(A):
+    """
+    Sorts a square matrix whose diagonal elements have been shifted to its first column,
+    such as:
+    A = [A11, A12, A13, A14]
+        [A22, A21, A23, A24]
+        [A33, A31, A32, A34]
+        [A44, A41, A42, A43]
+    The expected output for the function is
+    Ao =
+        [A11, A12, A13, A14]
+        [A21, A22, A23, A24]
+        [A31, A32, A33, A34]
+        [A41, A42, A43, A44]
+
+    Parameters
+    ----------
+    A : ndarray
+        Matrix to be sorted. Must have more than one row.
+    Returns
+    -------
+    Ao : ndarray
+        Sorted output.
+    """
+    Ao = copy(A)
+    m, _ = Ao.shape
+
+    if m > 1:
+        for i in range(1,m):
+            Ao[i,i] = Ao[i,0]
+            for j in range(0,i):
+                Ao[i,j] = A[i,j+1]
+    return Ao
+
 def fir(nb, nk, u, y):
     """
     Estimates a FIR model based on input (u(t)) and output (y(t)) vectors.
@@ -65,7 +154,7 @@ def fir(nb, nk, u, y):
     # Solve the Ls problem
     phi = copy(phiu)
     y = reshape(y[L:Ny, :], ((Ny-L)*ny, 1))
-    theta = qrsol(phi, y)[0]
+    theta, V, R = qrsol(phi, y)
     b = theta[0:]
     # Output
     B = empty((ny, nu), dtype='object')
@@ -74,7 +163,23 @@ def fir(nb, nk, u, y):
         for j in range(0, nu):
             B[i, j] = append(zeros((1, nk[i, j])), b[k:k+nb[i, j]+1])
             k += nb[i,j] + 1
-    return B
+    # Model
+    m = polymodel('fir', None, B, None, None, None, nk, db, (u, y), nu, ny, 1)
+    # Estimate the noise
+    e = y - dot(phiu, theta.reshape((db, 1)))
+    # Reshape e
+    e = e.reshape(((Nu-L), ny))
+    # Get the noise covariace
+    sig = dot(e.T, e)/Ny
+    # Estimate the parameter covariance
+    isig = inv(sig)
+    M = zeros((db, db))
+    for k in range(0, phi.shape[0], ny):
+        M += phi[k:k+ny, :].T @ isig @ phi[k:k+ny, :]
+    M = M/Ny
+    # Set model parameters
+    m.setcov(V**2/Ny, inv(M)/Ny, sig)
+    return m
 
 def arx(na, nb, nk, u, y, opt=0):
     """
@@ -126,7 +231,6 @@ def arx(na, nb, nk, u, y, opt=0):
         # Input
         for j in range(0, nu):
             if (nb[i, j] > -1):
-                #phiu[:, kb:kb+nb[i, j]+1] = kron(toeplitz(u[L-nk[i, j]:-nk[i, j], j], u[L-nk[i, j]-nb[i, j]:L-nk[i, j]+1, j][::-1]), Iny[:, i:i+1]) #Should be Iny[:,j:j+1]
                 phiu[:, kb:kb+nb[i, j]+1] = kron(toeplitz(u[L-nk[i, j]:Nu-nk[i, j], j], u[L-nk[i, j]-nb[i, j]:L-nk[i, j]+1, j][::-1]), Iny[:, i:i+1])
                 kb += nb[i, j] + 1
         # Output
@@ -136,8 +240,9 @@ def arx(na, nb, nk, u, y, opt=0):
                 ka += na[i,j]
     # Solve the Ls problem
     phi = concatenate((phiy, phiu), axis=1)
+    yo = copy(y)
     y = reshape(y[L:Ny, :], ((Ny-L)*ny, 1))
-    theta = qrsol(phi, y)[0]
+    theta, V, R = qrsol(phi, y)
     a = theta[0:da]
     b = theta[da:da+db+1]
     # Prepare the results
@@ -153,7 +258,18 @@ def arx(na, nb, nk, u, y, opt=0):
             else:
                 A[i, j] = append([0], a[ka:ka+na[i,j]])
             ka += na[i, j]
-    return [A, B]
+    # Model
+    m = polymodel('arx', A, B, None, None, None, nk, da+db, (u, y), nu, ny, 1)
+    e = (filtmat(A, yo) - filtmat(B, u))[L:Ny, 0:ny]
+    sig = (e.T @ e)/Ny
+    isig = inv(sig)
+    M = zeros((da + db, da + db))
+    for k in range(0, phi.shape[0], ny):
+        M += phi[k:k+ny, :].T @ isig @ phi[k:k+ny, :]
+    M /= Ny # phi.T @ inv(sig) @ phi
+    m.setcov(V**2/Ny, inv(M)/Ny, sig)
+    m.setparameters(array(a.tolist() + b.tolist()))
+    return m
 
 def armax(na, nb, nc, nk, u, y):
     """
@@ -191,6 +307,9 @@ def armax(na, nb, nc, nk, u, y):
     #Input Handling
     Nu, nu = shape(u)
     Ny, ny = shape(y)
+    da = sum(sum(na))
+    db = sum(sum(nb+1))
+    dc = sum(sum(nc))
     # Define the prediction error
     def pe(theta, na, nb, nc, nk, u, y):
         Ny, ny = shape(y)
@@ -214,13 +333,17 @@ def armax(na, nb, nc, nk, u, y):
     # Initial Guess
     A = empty((ny, ny), dtype=object)
     B = empty((ny, nu), dtype=object)
-    C = empty((ny,), dtype = object)
+    C = empty((ny, 1), dtype = object)
     for i in range(0, ny):
         A_ = []
         B_ = []
         E = copy(y[:,i:i+1])
         # High order model
-        aho, bho = arx(50, [50,]*nu, [1,]*nu, u, y[:, i:i+1])
+        ho = int(floor((Nu - amax(nk)*(nu+1))/(nu+2)))
+        if(ho > 50):
+            ho = 50
+        mho = arx(ho, [ho,]*nu, [1,]*nu, u, y[:, i:i+1])
+        aho, bho = mho.A, mho.B
         # Estimate of the prediction errors
         ehat = lfilter(aho[0][0], [1], y[:, i:i+1], axis=0)
         for j in range(0, nu):
@@ -231,7 +354,8 @@ def armax(na, nb, nc, nk, u, y):
         # Inputs
         inps = concatenate((y[:, index], u, ehat), axis=1)
         nkk = array(append([1, ]*len(na[i, index]), append(nk[i, :], 1)), ndmin=2, dtype='int')
-        A_, BAC = arx([na[i, i]], array(append(na[i, index] - 1, append(nb[i, :], nc[i]-1)), ndmin=2), nkk, inps, y[:, i:i+1])
+        m_ = arx([na[i, i]], array(append(na[i, index] - 1, append(nb[i, :], nc[i]-1)), ndmin=2), nkk, inps, y[:, i:i+1])
+        A_, BAC = m_.A, m_.B
         thetai = A_[0][0][1:]
         for k in range(len(nkk[0])):
             thetai = append(thetai, BAC[0][k][nkk[0][k]:])
@@ -242,19 +366,87 @@ def armax(na, nb, nc, nk, u, y):
         NA = concatenate((tarna, na[i][index]))
         sol = least_squares(pe, thetai, args=(NA, nb[i], nc[i], nk[i], u.reshape(Nu, nu), Y.reshape((Ny, ny))))
         theta = sol.x
-        C[i] = append([1], theta[sum(na[i])+sum(nb[i]+1):sum(na[i])+sum(nb[i]+1)+sum(nc[i])+1])
+        C[i,0] = append([1], theta[sum(na[i])+sum(nb[i]+1):sum(na[i])+sum(nb[i]+1)+sum(nc[i])+1])
         k = sum(na[i])
         for j in range(0, nu):
             B[i, j] = append(zeros((1, nk[i,j])), theta[k:k+nb[i, j]+1])
             k += nb[i, j] + 1
         k = 0
         for j in range(0, ny):
-            if (i == j):
+            if (j == 0):
                 A[i, j] = append([1], theta[k:k+na[i, j]])
             else:
                 A[i, j] = append([0], theta[k:k+na[i, j]])
             k += na[i, j]
-    return [A, B, C]
+    # Sort A
+    As = sortmat(A)
+    # Estimate the prediction error: e(t) = C**-1 (y - G u)
+    # Get covariance:
+    L = amax([amax(na), amax(nb + nk), amax(nc)])
+    I = empty((ny, ny), dtype='object')
+    for i in range(ny):
+        for j in range(ny):
+            if i == j:
+                I[i, j] = array([1])
+            else:
+                I[i, j] = array([0])
+    ehat = (filtmat(As, y, C) - filtmat(B, u, C)) #[L:Ny, 0:ny]
+    # Get covariance of ehat
+    sig = (ehat.T @ ehat)/Ny
+    # Inverse of sig
+    isig = inv(sig)
+    # Model
+    m = polymodel('armax', As, B, C, None, None, nk, da+db+dc, (u, y), nu, ny, 1)
+    # Get filtered signals
+    Iny = eye(ny)
+    psiy = zeros(((Ny-L)*ny, da))
+    psiu = zeros(((Nu-L)*ny, db))
+    psie = zeros(((Ny-L)*ny, dc))
+    ka = 0
+    kb = 0
+    kc = 0
+    # Output regressors and Input Regressors
+    for i in range(0, ny):
+        # Get filtered signals
+        uf = lfilter([1], C[i][0], u, axis=0)
+        yf = lfilter([1], C[i][0], y, axis=0)
+        ef = lfilter([1], C[i][0], ehat, axis=0)
+        # Input
+        for j in range(0, nu):
+            if (nb[i, j] > -1):
+                psiu[:, kb:kb+nb[i, j]+1] = kron(toeplitz(uf[L-nk[i, j]:Nu-nk[i, j], j], uf[L-nk[i, j]-nb[i, j]:L-nk[i, j]+1, j][::-1]), Iny[:, i:i+1])
+                kb += nb[i, j] + 1
+        # Output
+        for j in range(0, ny):
+            if (na[i, j] > 0):
+                psiy[:, ka:ka+na[i,j]] = kron(-toeplitz(yf[L-1:-1, j], yf[L-na[i, j]:L, j][::-1]),Iny[:, i:i+1])
+                ka += na[i,j]
+        # Error
+        if (nc[i][0] > 0):
+            psie[:, kc:kc+nc[i][0]] = kron(toeplitz(ef[L-1:-1, i], ef[L-nc[i][0]:L, i][::-1]),Iny[:, i:i+1])
+            kc += nc[i][0]
+    psi = concatenate((psiy, psiu, psie), axis=1)
+    # Get gradient of the prediction error
+    # Initialize information matrix
+    M = zeros((da + db + dc, da + db + dc))
+    for k in range(0, psi.shape[0], ny):
+        M += psi[k:k+ny, :].T @ isig @ psi[k:k+ny, :]
+    M /= Ny
+    m.M = M
+    m.setcov(sig**2, inv(M)/Ny, sig)
+    # Collect parameters
+    thetaa = []
+    thetab = []
+    thetac = []
+    for i in range(ny):
+        for j in range(ny):
+            thetaa += As[i, j][1:].tolist()
+        for j in range(nu):
+            thetab += B[i, j][nk[i, j]:].tolist()
+        thetac += C[i][0][1:].tolist()
+
+    m.setparameters(array(thetaa+thetab+thetac))
+    return m
 
 def oe(nb, nf, nk, u, y):
     """
@@ -288,6 +480,8 @@ def oe(nb, nf, nk, u, y):
     # Input Handling
     Nu, nu = shape(u)
     Ny, ny = shape(y)
+    db = sum(sum(nb+1))
+    df = sum(sum(nf))
     # Define the prediction error
     def pe(theta, nf, nb, nk, u, y):
         Nu, nu = shape(u)
@@ -309,8 +503,11 @@ def oe(nb, nf, nk, u, y):
                 #TODO verify the strange lfilter behavior here too
         return e
     # Initialization
+    parb = []
+    parf = []
     B = empty((ny, nu), dtype=object)
     F = empty((ny, nu), dtype=object)
+    BdF = empty((ny, nu), dtype=object)
     for j in range(0, ny):
         A = []
         B_ = []
@@ -333,12 +530,56 @@ def oe(nb, nf, nk, u, y):
         kb = 0
         f = theta[0:sum(nf[j])]
         b = theta[sum(nf[j]):sum(nf[j])+sum(nb[j]+1)+2]
+        parb += b.flatten().tolist()
+        parf += f.flatten().tolist()
         for i in range(0, nu):
             B[j, i] = append(zeros((1, nk[j, i])), b[kb:kb+nb[j, i]+1])
             F[j, i] = append([1], f[kf:kf+nf[j, i]])
+            BdF[j, i] = (B[j, i], F[j, i])
             kf += nf[j, i]
             kb += nb[j, i] + 1
-    return [B, F]
+    ehat = y - filtmat(BdF, u, isrational=True) #[L:Ny, 0:ny]
+    # Get covariance of ehat
+    sig = (ehat.T @ ehat)/Ny
+    # Inverse of sig
+    isig = inv(sig)
+    # Model
+    kb = 0
+    kf = 0
+    # Get covariance:
+    L = amax([amax(nf), amax(nb + nk)])
+    Iny = eye(ny)
+    psiy = zeros(((Ny-L)*ny, df))
+    psiu = zeros(((Nu-L)*ny, db))
+    # Output regressors and Input Regressors
+    for i in range(0, ny):
+        kw = 0
+        # Get filtered signals
+        uf = zeros((Ny, nu))
+        wf = zeros((Ny, nu))
+        # Input
+        for j in range(0, nu):
+            if (nb[i, j] > -1):
+                wf[:, kw] = lfilter(B[i, j], convolve(F[i, j], F[i, j]), u[:, j], axis=0)
+                uf[:, kw] = lfilter([1], F[i, j], u[:, j], axis=0)
+                psiu[:, kb:kb+nb[i, j]+1] = kron(toeplitz(uf[L-nk[i, j]:Nu-nk[i, j], j], uf[L-nk[i, j]-nb[i, j]:L-nk[i, j]+1, j][::-1]), Iny[:, i:i+1])
+                psiy[:, kf:kf+nf[i,j]] = kron(-toeplitz(wf[L-1:-1, kw], wf[L-nf[i, j]:L, kw][::-1]),Iny[:, i:i+1])
+                kb += nb[i, j] + 1
+                kf += nf[i,j]
+                kw += 1
+    # Get Model
+    m = polymodel('oe', None, B, None, None, F, nk, db+df, (u, y), nu, ny, 1)
+    psi = concatenate((psiu, psiy), axis=1)
+    # Get gradient of the prediction error
+    # Initialize information matrix
+    M = zeros((df + db, df + db))
+    for k in range(0, psi.shape[0], ny):
+        M += psi[k:k+ny, :].T @ isig @ psi[k:k+ny, :]
+    M /= Ny
+    m.M = M
+    m.setcov(sol.cost, inv(M)/Ny, sig)
+    m.setparameters(array(parb+parf))
+    return m
 
 def bj(nb, nc, nd, nf, nk, u, y):
     """
@@ -379,6 +620,10 @@ def bj(nb, nc, nd, nf, nk, u, y):
     # Input Handling
     Nu, nu = shape(u)
     Ny, ny = shape(y)
+    db = sum(sum(nb+1))
+    dc = sum(sum(nc))
+    dd = sum(sum(nd))
+    df = sum(sum(nf))
     # Number of parameters do estimate
     #dp = nf + nb + nc + nd + 1
     # Define the prediction error
@@ -404,9 +649,14 @@ def bj(nb, nc, nd, nf, nk, u, y):
         return e
     # Initial Guess
     B = empty((ny, nu), dtype=object)
-    C = empty((ny, ), dtype=object)
-    D = empty((ny, ), dtype=object)
+    C = empty((ny,1), dtype=object)
+    D = empty((ny,1), dtype=object)
     F = empty((ny, nu), dtype=object)
+    # Parameter
+    parb = []
+    parc = []
+    pard = []
+    parf = []
     # TODO: Verify a way to compute an ARMA process
     for j in range(0, ny):
         thetaf = []
@@ -439,8 +689,10 @@ def bj(nb, nc, nd, nf, nk, u, y):
         sol = least_squares(pe, thetai, args=(nf[j], nb[j], nc[j][0], nd[j][0], nk[j], u.reshape(Nu, nu), y[:,j]))
         theta = sol.x
         #B[j] = append(zeros((1, nk[j])), theta[nf[j]:nf[j]+nb[j]+1])
-        C[j] = append([1], theta[sum(nf[j])+sum(nb[j]+1):nc[j][0]+sum(nf[j])+sum(nb[j]+1)])
-        D[j] = append([1], theta[nc[j][0]+sum(nf[j])+sum(nb[j]+1):nd[j][0]+nc[j][0]+sum(nf[j])+sum(nb[j]+1)])
+        C[j,0] = append([1], theta[sum(nf[j])+sum(nb[j]+1):nc[j][0]+sum(nf[j])+sum(nb[j]+1)])
+        D[j,0] = append([1], theta[nc[j][0]+sum(nf[j])+sum(nb[j]+1):nd[j][0]+nc[j][0]+sum(nf[j])+sum(nb[j]+1)])
+        parc += C[j, 0][1:].tolist()
+        pard += D[j, 0][1:].tolist()
         #F[j] = append([1], theta[0:nf[j]])
         F_ = theta[0:sum(nf[j])]
         B_ = theta[sum(nf[j]):sum(nf[j])+sum(nb[j]+1)]
@@ -449,9 +701,75 @@ def bj(nb, nc, nd, nf, nk, u, y):
         for i in range(0, nu):
             F[j, i] = append([1], F_[kf:kf+nf[j, i]])
             B[j, i] = append(zeros((1, nk[j, i])), B_[kb:kb+nb[j, i]+1])
+            parf += F[j, i][1:].tolist()
+            parb += B_[kb:kb+nb[j, i]+1].tolist()
             kf += nf[j, i]
             kb += nb[j, i] + 1
-    return [B, C, D, F]
+        # Model
+    m = polymodel('boxjenkins', None, B, C, D, F, nk, db+dc+dd+df, (u, y), nu, ny, 1)
+    # Set the parameters
+    m.setparameters(array(parb + parc + pard + parf))
+    # Get the prediction error
+    ehat = zeros((Ny, ny))
+    for k in range(ny):
+        ehat[:, k] = lfilter(D[k, 0], C[k, 0], y[:, k], axis=0)
+        for i in range(nu):
+            ehat[:, k] -= lfilter(convolve(B[k, i], D[k, 0]),
+                                  convolve(C[k, 0], F[k, i]), u[:, i], axis=0)
+    # Get covariance of ehat
+    sig = (ehat.T @ ehat)/Ny
+    # Inverse of sig
+    isig = inv(sig)
+    # Get covariance:
+    L = amax([amax(nf), amax(nb + nk), amax(nc), amax(nd)])
+    Iny = eye(ny)
+    psiy = zeros(((Ny-L)*ny, df))
+    psiu = zeros(((Nu-L)*ny, db))
+    psiec = zeros(((Nu-L)*ny, dc))
+    psied = zeros(((Nu-L)*ny, dd))
+    kb = 0
+    kc = 0
+    kd = 0
+    kf = 0
+    # Output regressors and Input Regressors
+    for i in range(0, ny):
+        kw = 0
+        # Get filtered signals
+        uf = zeros((Ny, nu))
+        w = zeros((Ny, 1))
+        wf = zeros((Ny, nu))
+        ef = lfilter([1], C[i, 0], ehat, axis=0)
+        psiec[:, kc:kc+nc[i][0]] = kron(toeplitz(ef[L-1:-1, i], ef[L-nc[i][0]:L, i][::-1]), Iny[:, i:i+1])
+        kc += nc[i][0]
+        # Input
+        for j in range(0, nu):
+            if (nb[i, j] > -1):
+                w[:, 0] += lfilter(B[i, j], F[i, j], u[:, j], axis=0)
+                wf[:, kw] = lfilter(convolve(B[i, j], D[i, 0]),
+                                    convolve(convolve(F[i, j], F[i, j]), C[i, 0]),
+                                             u[:, j], axis=0)
+                uf[:, kw] = lfilter(D[i, 0], convolve(F[i, j], C[i, 0]), u[:, j], axis=0)
+
+                psiu[:, kb:kb+nb[i, j]+1] = kron(toeplitz(uf[L-nk[i, j]:Nu-nk[i, j], j], uf[L-nk[i, j]-nb[i, j]:L-nk[i, j]+1, j][::-1]), Iny[:, i:i+1])
+                psiy[:, kf:kf+nf[i,j]] = kron(-toeplitz(wf[L-1:-1, kw], wf[L-nf[i, j]:L, kw][::-1]), Iny[:, i:i+1])
+                kb += nb[i, j] + 1
+                kf += nf[i, j]
+                kw += 1
+        # Get the last one
+        vf = lfilter([1], C[i, 0], w-y[:, i:i+1], axis=0)
+        psied[:, kd:kd+nd[i][0]] = kron(toeplitz(vf[L-1:-1, 0], vf[L-nd[i][0]:L, 0][::-1]), Iny[:, i:i+1])
+        kd += nd[i][0]
+    # Make the information matrix
+    psi = concatenate((psiu, psiec, psied, psiy), axis=1)
+    # Get gradient of the prediction error
+    # Initialize information matrix
+    M = zeros((df + db + dc + dd, df + db + dc + dd))
+    for k in range(0, psi.shape[0], ny):
+        M += psi[k:k+ny, :].T @ isig @ psi[k:k+ny, :]
+    M /= Ny
+    m.M = M
+    m.setcov(sol, inv(M)/Ny, sig)
+    return m
 
 # %% Testing functions
 def pem(A, B, C, D, F, u, y, mu=[] ,solver='lm'):
@@ -487,6 +805,11 @@ def pem(A, B, C, D, F, u, y, mu=[] ,solver='lm'):
     #Input Handling
     Ny, ny = shape(y)
     Nu, nu = shape(u)
+    da = sum(sum(na))
+    db = sum(sum(nb+1))
+    dc = sum(sum(nc))
+    dd = sum(sum(nd))
+    df = sum(sum(nf))
     #Empty mask
     mu = array(mu)
     if size(mu) == 0:
@@ -992,7 +1315,8 @@ def pem(A, B, C, D, F, u, y, mu=[] ,solver='lm'):
                     F[i] = 1
     #SIMO case
     elif (nu==1):
-        do = nothing
+        #do = nothing
+        pass
     #MIMO case
     else:
         #Define the orders of the polynomials
@@ -1061,7 +1385,7 @@ def pem(A, B, C, D, F, u, y, mu=[] ,solver='lm'):
                     #Known Elements
                     kA[i] = count_nonzero(muA[i])
                     #Unknown elements
-                    uKA[i] = na[i] - kA[i]
+                    ukA[i] = na[i] - kA[i]
                 kB = zeros((nu,), dtype = 'int32')
                 kF = zeros((nu,), dtype = 'int32')
                 #Unknown

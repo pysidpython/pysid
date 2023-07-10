@@ -6,7 +6,7 @@ author: @edumapurunga
 """
 
 # Imports
-from numpy import arange, array, append, asscalar, copy, count_nonzero, ones,\
+from numpy import arange, array, append, copy, count_nonzero, ones,\
 delete, dot, empty, sum, size, amax, matrix, concatenate, shape, zeros, kron,\
 eye, reshape, convolve, sqrt, where, nonzero, correlate, equal, ndarray, pi, \
 absolute, exp, log, real
@@ -57,16 +57,12 @@ def ar(na, y, md = 'yw'):
         A = append([1], theta)
     return A
 
-def arma(na, nb, y, md='pem'):
+def arma(na, nc, y, md='pem'):
     """
     This functions estimates the parameters of an ARMA model defined as:
-        A(q)y(t) = B(q)e(t)
+        A(q)y(t) = C(q)e(t)
     """
-    y = array(y)
-    if na != 0:
-        na = array(na)
-    if nb != 0:
-        nb = array(nb)
+    na, _, nc, _, _, _, _, y = chckin(na, [], nc, [], [], [], y, y)
     # size
     Ny, ny = shape(y)
     # Hannan-Rissanen Algorithm
@@ -76,7 +72,7 @@ def arma(na, nb, y, md='pem'):
         Ar = ar(n, y, md='burg')
         ehat = lfilter(Ar, [1], y, axis=0)
         # Step 2: Estimate an initial ARMA model
-        A1, B1 = ls(na, nb, 1, ehat, y)
+        A1, B1 = ls(na, nc-1, 1, ehat, y)
         # Step 3: Reestimate based on an approximation of ML
         etil = lfilter(append([1], A1), [1], y, axis=0) - lfilter(append([0], B1), [1], ehat, axis=0)
         # Predictors Inputs
@@ -93,38 +89,38 @@ def arma(na, nb, y, md='pem'):
     # PEM algorithm
     if md == 'pem':
         # Define the prediction error
-        def pe(theta, na, nb, y):
+        def pe(theta, na, nc, y):
             return lfilter(append([1], theta[0:na]), append([1], theta[na:]), y, axis=0)
         # Least Squares Initialization
         n = 50
         Ar = ar(n, y, md='burg')
         ehat = lfilter(Ar, [1], y, axis=0)
-        A1, B1 = ls(na, nb, 1, ehat, y)
+        A1, B1 = ls(na, nc-1, 1, ehat, y)
         thetai = concatenate((A1, B1))
-        sol = least_squares(pe, thetai, gtol=1e-15, args=(na, nb, y.reshape((Ny))))
+        sol = least_squares(pe, thetai, gtol=1e-15, args=(na, nc, y.reshape((Ny))))
         theta = sol.x
         A = append([1], theta[0:na])
         B = append([1], theta[na:])
     return [A, B]
 
-def ma(nb, y, md='durbin'):
+def ma(nc, y, md='durbin'):
     """
-    This function estimates the parameters of a moving avarage model in the form:
-        y(t) = B(q)e(t)
+    This function estimates the parameters of a moving average model in the form:
+        y(t) = C(q)e(t)
     """
-    nb = array(nb)
+    nc = array(nc)
     y = array(y)
     Ny, ny = shape(y)
     # Durbin Method
     if md == 'durbin':
         # Estimate a high order AR
-        n = 2*nb.item()
+        n = 2*nc.item()
         Ar = ar(n, y, 'burg')
         # Estimate the innovations
         ehat = lfilter(Ar, [1], y, axis=0)
         v = y - ehat
-        B = ls(0, nb, 1, ehat, v)[1]
-        B = append([1], B)
+        B = ls(0, nc-1, 1, ehat, v)[1]
+        C = append([1], B)
     # Vocariance recursion method
     if md == 'vrm':
         Psi = zeros((Ny,))
@@ -143,26 +139,26 @@ def ma(nb, y, md='durbin'):
             #TODO: Verify how to compute the ceptrum
             c[k] = 1/Ny*sum(real(log(Psi)*exp(-1j*wk[k]*t)))
         # Estimate the MA parameters
-        b = zeros((nb+2,))
+        b = zeros((nc+2,))
         b[0] = 1
-        for j in range(1, nb+2):
+        for j in range(1, nc+2):
             for p in range(0, j):
                 b[j]+= (j-p)*c2[j-p]*b[p]
             b[j] = b[j]/j
-        B = copy(b)
+        C = copy(b)
     # Prediction Error Method
     if md == 'pem':
         # Define the prediction error
-        def pe(theta, nb, y):
-            return lfilter([1], append([1], theta[0:nb+1]), y, axis=0)
+        def pe(theta, nc, y):
+            return lfilter([1], append([1], theta[0:nc+1]), y, axis=0)
         # Estimate a high order AR
         n = 50
         Ar = ar(n, y, 'burg')
         # Estimate e hat
         ehat = lfilter(Ar, [1], y, axis=0)
         # Least Squares Initialization
-        thetai = ls(0, nb, 1, ehat, y)[1]
-        sol = least_squares(pe, thetai, gtol=1e-15, args=(nb, y.reshape((Ny))))
+        thetai = ls(0, nc-1, 1, ehat, y)[1]
+        sol = least_squares(pe, thetai, gtol=1e-15, args=(nc, y.reshape((Ny))))
         theta = sol.x
-        B = append([1], theta)
-    return B
+        C = append([1], theta)
+    return C
